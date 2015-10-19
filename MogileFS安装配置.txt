@@ -1,0 +1,372 @@
+MogileFS安装配置
+
+
+
+
+1.MogileFS是一个开源的分布式文件系统，用于组建分布式文件集群，目前使用MogileFS的公司非常多，
+  就国内而言如yupoo，digg，土豆，豆瓣，1号店， 大众点评，搜狗，安居客等。
+
+2.MogileFS组成部分
+
+  server端：包括mogilefsd和mogstored两个程序。mogilefsd即tracker，它将一些全局信息保存在数据库里，
+  例如：站点domain，class，host等。mogstored即存储节点，默认侦听在7500端口，接受客户端的文件备份请求。
+  在安装完后，要运行mogadm工具将所有的存储节点注册到mogilefsd的数据库里，mogilefsd会对这些节点进行管理和监控。
+  
+  utils（工具集）：主要是MogileFS的一些管理工具，例如mogadm等。
+  
+  客户端API：目前只有Perl API(MogileFS.pm)、PHP，用这个模块可以编写客户端程序，
+  实现文件的备份管理功能,提供MogileFS.pm。
+
+3.安装配置mariadb
+	参见相关教程
+
+4.设置权限
+mysql
+grant all on *.* to 'root'@'192.168.11.%' identified by 'will';
+grant all on mogilefs.* to 'moguser'@'192.168.11.%' identified by 'mogpass';
+flush privileges;
+\q
+
+5.安装mogilefs
+yum install MogileFS-* Perlbal-1.78-1.el6.noarch.rpm perl-* perl-IO-AIO -y
+
+
+6.配置tracker
+\mv /etc/mogilefs/mogilefsd.conf /etc/mogilefs/mogilefsd.conf.ori
+cat >>/etc/mogilefs/mogilefsd.conf<<EOF
+daemonize = 1
+pidfile = /var/run/mogilefsd/mogilefsd.pid
+db_dsn = DBI:mysql:mogilefs:host=192.168.11.235
+db_user = moguser                              
+db_pass = mogpass                              
+listen = 0.0.0.0:7001                          
+conf_port = 7001
+query_jobs = 10
+delete_jobs = 1
+replicate_jobs = 5
+reaper_jobs = 1
+EOF
+
+7.配置mogstored
+mv /etc/mogilefs/mogstored.conf /etc/mogilefs/mogstored.conf.ori
+cat >>/etc/mogilefs/mogstored.conf<<EOF 
+maxconns = 10000                                #最大连接数
+httplisten = 0.0.0.0:7500                       #http监听地址
+mgmtlisten = 0.0.0.0:7501                       #mgm监听地址
+docroot = /mogdata
+EOF
+
+8.启动前配置
+
+	1.将配置文件同步至另一节点 
+scp /etc/mogilefs/* lab4:/etc/mogilefs/
+
+	2.创建设备挂载点
+mkdir /mogdata/dev1 -pv #另一节点创建dev2
+chown -R mogilefs.mogilefs /mogdata/
+
+	3.初始化数据库
+mogdbsetup  --dbhost=192.168.11.235 --dbrootuser=root --dbrootpass=will --dbuser=moguser --dbpass=mogpass --dbname=mogilefs --yes
+#在一个节点执行即可
+#如果不成功,很有可能是因为dns问题
+#添加如下配置重启mariadb即可
+#skip-name-resolve 
+#有时要执行两次
+
+	4.检查数据库有无数据
+
+	5.启动
+service mogilefsd start
+service mogstored start
+
+netstat -tunlp | grep mog
+
+	6.添加节点
+mogadm --trackers=192.168.11.233:7001 host add node1 --ip=192.168.11.233 --status=alive
+mogadm --trackers=192.168.11.234:7001 host add node2 --ip=192.168.11.234 --status=alive
+
+	7.添加设置
+mogadm --trackers=192.168.11.233:7001 device add node1 1
+mogadm --trackers=192.168.11.233:7001 device add node2 2
+#添加设备时所使用的设备ID号必须要/mogdata中的dev编号一致
+
+	8.检查状态
+mogadm --trackers=192.168.11.233:7001 check
+
+	9.创建domain
+mogadm --trackers=192.168.11.233:7001 domain add files
+mogadm --trackers=192.168.11.233:7001 domain add html
+mogadm --trackers=192.168.11.233:7001 domain add images
+
+9.测试
+	1.上传测试
+mogupload --trackers=192.168.11.233:7001 --domain=html --key='fstab.html' --file='/etc/fstab'
+mogupload --trackers=192.168.11.233:7001 --domain=images --key='test.jpg' --file='/root/test.jpg'
+
+	2.查看
+moglistkeys --trackers=192.168.11.233:7001 --domain=html
+moglistkeys --trackers=192.168.11.233:7001 --domain=images
+
+	3.获取数据
+mogfileinfo --trackers=192.168.11.233:7001 --domain=html --key='fstab.html'
+mogfileinfo --trackers=192.168.11.233:7001 --domain=images --key='test.jpg'
+
+	4.通过fid用浏览器查看数据
+
+
+10.nginx安装配置
+
+	1.安装依赖
+yum install -y zlib-devel pcre-devel openssl-devel
+
+	2.下载安装
+#wget http://nginx.org/download/nginx-1.5.4.tar.gz
+useradd -s /sbin/nologin -M nginx
+wget http://nginx.org/download/nginx-1.9.3.tar.gz
+tar xf nginx-1.9.3.tar.gz
+tar xf nginx_mogilefs_module-1.0.4.tar.gz
+cd nginx-1.9.3/
+./configure \
+--prefix=/usr/local/nginx \
+--user=nginx --group=nginx \
+--with-http_ssl_module \
+--with-http_flv_module \
+--with-http_stub_status_module \
+--with-http_gzip_static_module \
+--with-pcre \
+--add-module=../nginx_mogilefs_module-1.0.4
+
+	make && make install
+
+	#准备启动脚本
+vim /etc/init.d/nginx
+#!/bin/bash
+# nginx Startup script for the Nginx HTTP Server
+# it is v.1.4.7 version.
+# chkconfig: - 85 15
+# description: Nginx is a high-performance web and proxy server.
+# It has a lot of features, but it's not for everyone.
+# processname: nginx
+ 
+# pidfile: /usr/local/nginx/logs/nginx.pid
+# config: /usr/local/nginx/conf/nginx.conf
+ 
+nginxd=/usr/local/nginx/sbin/nginx
+nginx_config=/usr/local/nginx/conf/nginx.conf
+nginx_pid=/usr/local/nginx/logs/nginx.pid
+nginx_lock=/var/lock/subsys/nginx
+RETVAL=0
+prog="nginx"
+ 
+# Source function library.
+. /etc/rc.d/init.d/functions
+ 
+# Source networking configuration.
+. /etc/sysconfig/network
+ 
+# Check that networking is up.
+[ ${NETWORKING} = "no" ] && exit 0
+[ -x $nginxd ] || exit 0
+ 
+# Start nginx daemons functions.
+start() {
+    nginx_is_run=`ps -ef | egrep 'nginx:\s*(worker|master)\s*process' | wc -l`
+    if [ ${nginx_is_run} -gt 0 ];then
+        echo "nginx already running...."
+        exit 1
+    fi
+    echo -n $"Starting $prog: "
+    daemon $nginxd -c ${nginx_config}
+    RETVAL=$?
+    echo
+    [ $RETVAL = 0 ] && touch ${nginx_lock}
+    return $RETVAL
+}
+ 
+# Stop nginx daemons functions.
+stop() {
+    echo -n $"Stopping $prog: "
+    killproc $nginxd
+    RETVAL=$?
+    echo
+    [ $RETVAL = 0 ] && rm -f ${nginx_lock} ${nginx_pid}
+}
+ 
+# Reload nginx config file
+reload() {
+    echo -n $"Reloading $prog: "
+    #kill -HUP `cat ${nginx_pid}`
+    killproc $nginxd -HUP
+    RETVAL=$?
+    echo
+}
+ 
+# See how we were called.
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    reload)
+        reload
+        ;;
+    restart)
+          stop
+        start
+        ;;
+    status)
+        status $prog
+        RETVAL=$?
+        ;;
+    *)
+        echo $"Usage: $prog {start|stop|restart|reload|status|help}"
+        exit 1
+esac
+
+	#加入开机启动控制项
+chmod +x /etc/init.d/nginx
+chkconfig --add nginx
+
+
+	3.启动测试
+service nginx start
+curl 127.0.0.1
+
+	4.配置
+mv /usr/local/nginx/conf/nginx.conf /usr/local/nginx/conf/nginx.conf.ori
+cat >>/usr/local/nginx/conf/nginx.conf<<EOF
+user  nginx nginx;
+worker_processes  2;
+worker_rlimit_nofile 102400;
+
+pid        logs/nginx.pid;
+error_log  logs/error.log  notice;
+
+
+events
+{
+    use epoll;
+    worker_connections 65536;
+}
+
+http
+{
+    include             mime.types;
+    default_type        application/octet-stream;
+    #charset    gb2312;
+    server_tokens off;
+    server_names_hash_bucket_size  128;
+    client_header_buffer_size  32k;
+    large_client_header_buffers 4 32k;
+    client_max_body_size  8m;
+    
+    sendfile on;
+    tcp_nopush  on;
+    keepalive_timeout 60;
+    
+    tcp_nodelay on;
+    
+    fastcgi_connect_timeout 300;
+    fastcgi_send_timeout 300;
+    fastcgi_read_timeout 300;
+    fastcgi_buffer_size 64k;
+    fastcgi_buffers 4 64k;
+    fastcgi_busy_buffers_size 128k;
+    fastcgi_temp_file_write_size 128k;
+    
+    
+    gzip on;
+    gzip_min_length  1k;
+    gzip_buffers     4 16k;
+    gzip_http_version 1.0;
+    gzip_comp_level 2;
+    gzip_types  text/plain application/x-javascript text/css application/xml;
+    gzip_vary on;
+    
+    
+    #limit_zone  crawler  \$binary_remote_addr 10m;
+    log_format  commonlog  '\$remote_addr - \$remote_user [\$time_local] "\$request" '
+                '\$status \$body_bytes_sent "\$http_referer" '
+                ' "\$http_user_agent" \$http_x_forwarded_for';
+
+    access_log logs/access.log;
+    
+    include     vhosts/*.conf;
+}
+EOF
+
+mkdir /usr/local/nginx/conf/vhosts
+
+cat >>/usr/local/nginx/conf/vhosts/mogilefs.conf<<EOF
+upstream trackers {
+ 
+    server 192.168.11.233:7001;
+    server 192.168.11.234:7001;
+     
+ }
+ 
+server {
+    listen       80;
+    location ~* /images/  {
+ 
+       mogilefs_tracker trackers;
+       mogilefs_domain images;
+       mogilefs_pass  {
+            proxy_pass \$mogilefs_path;
+            proxy_hide_header Content-Type;
+            proxy_buffering off;
+       }
+     }
+    location ~* /html/ {
+ 
+        mogilefs_tracker trackers;
+        mogilefs_domain html;
+        mogilefs_pass  {
+             proxy_pass \$mogilefs_path;
+             proxy_hide_header Content-Type;
+             proxy_buffering off;
+        }
+     }
+     location ~* /files/ {
+ 
+            allow 192.168.11.0/24;
+            deny all;
+ 
+            mogilefs_tracker trackers;
+            mogilefs_domain files;
+            mogilefs_methods PUT DELETE;
+ 
+            mogilefs_pass {
+                proxy_pass \$mogilefs_path;
+                proxy_hide_header Content-Type;
+                proxy_buffering off;
+            }
+        }
+}
+EOF
+
+	5.重启测试
+
+#浏览器访问测试
+http://192.168.11.231/html/fstab.html
+http://192.168.11.231/images/test.jpg
+
+
+#使用nginx缓存
+proxy_cache_path  /var/cache/nginx/proxy_cache  levels=1:2
+keys_zone=http-cache:500m max_size=10g inactive=30d;
+proxy_temp_path /var/cache/nginx/proxy_cache/tmp;
+
+mogilefs_pass  {
+	    proxy_cache http-cache;
+	    proxy_cache_valid 200 304 12h;
+	    proxy_cache_key $mogilefs_path;
+        proxy_pass $mogilefs_path;
+        proxy_hide_header Content-Type;
+        #proxy_buffering off;
+	    add_header  X-Via  $server_addr;
+        add_header  X-Cache-Status $upstream_cache_status;
+        expires         10d;
+}
